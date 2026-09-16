@@ -16,11 +16,11 @@ local GAMES = {
 -- shared Nyx skin — injected so every game script themes identically
 getgenv().Nyx = getgenv().Nyx or {}
 getgenv().Nyx.theme = {
-	BackgroundColor = Color3.fromRGB(13, 11, 20),
-	MainColor       = Color3.fromRGB(20, 17, 30),
-	AccentColor     = Color3.fromRGB(157, 100, 255),
-	OutlineColor    = Color3.fromRGB(44, 36, 64),
-	FontColor       = Color3.fromRGB(236, 232, 245),
+	BackgroundColor = Color3.fromRGB(16, 12, 15),
+	MainColor       = Color3.fromRGB(25, 19, 23),
+	AccentColor     = Color3.fromRGB(233, 122, 173),
+	OutlineColor    = Color3.fromRGB(50, 39, 46),
+	FontColor       = Color3.fromRGB(240, 232, 237),
 }
 
 local function notify(text, dur)
