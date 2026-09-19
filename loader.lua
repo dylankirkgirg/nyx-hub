@@ -10,6 +10,8 @@ local StarterGui= game:GetService("StarterGui")
 local GAMES = {
 	{ match = "anime dice", name = "Anime Dice",
 	  url = "https://raw.githubusercontent.com/dylankirkgirg/anime-dice/main/src/main.lua" },
+	{ match = "steal a", name = "Steal An Egg", -- catches "Steal a Brainrot"-style renames too
+	  url = "https://raw.githubusercontent.com/dylankirkgirg/steal-an-egg/main/src/main.lua" },
 	-- more games slot in here as we build them
 }
 
