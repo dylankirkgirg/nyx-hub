@@ -62,7 +62,14 @@ if not hit then
 	return
 end
 
-notify("Loading " .. hit.name .. " …", 3)
+-- Hand the script the commit it is being served from. It builds its own
+-- core.lua URL from this, so the two files can no longer disagree by hand,
+-- and it shows the id in the window, so a stale CDN copy is visible rather
+-- than mysterious. Must come after the match above, which is what picks hit.
+getgenv().Nyx = getgenv().Nyx or {}
+getgenv().Nyx.pin = hit.url:match("nyx-hub/([^/]+)/") or "branch"
+
+notify("Loading " .. hit.name .. " @ " .. tostring(getgenv().Nyx.pin) .. " …", 4)
 local ok, src = pcall(function() return game:HttpGet(hit.url) end)
 if not ok then notify("Fetch failed for " .. hit.name, 5); return end
 

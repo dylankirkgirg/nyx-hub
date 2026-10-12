@@ -32,7 +32,11 @@ local function root()   local c = char(); return c and c:FindFirstChild("Humanoi
 -- can be served from a CDN replica that is hours behind the push, and this
 -- script then loads a build that has already been fixed. Keep in step with
 -- PIN in ../../loader.lua.
-local REPO = "https://raw.githubusercontent.com/dylankirkgirg/nyx-hub/db5291e/games/tower-incremental/"
+-- The loader hands us the commit it was served from, so this file and core.lua
+-- always come from the same build and PIN never has to be matched by hand.
+-- The fallback is for running this file directly instead of through the hub.
+local BUILD = (getgenv and getgenv().Nyx and getgenv().Nyx.pin) or "db5291e"
+local REPO = "https://raw.githubusercontent.com/dylankirkgirg/nyx-hub/" .. BUILD .. "/games/tower-incremental/"
 local Core = loadstring(game:HttpGet(REPO .. "core.lua"))()
 
 local function notify(text, dur)
@@ -1205,5 +1209,7 @@ end
 T.Farm:Show()
 
 scanPlayerData()
-notify(("Nyx ready — %d upgrades, %d tree nodes, %s gold")
-	:format(#Upgrades, #TreeNodes, Core.format(state.gold)), 6)
+-- Build id on purpose: an empty window is the symptom of a stale CDN copy,
+-- and the only way to know which build is live is for it to say so.
+notify(("Nyx %s — %d upgrades, %d tree nodes, %s gold")
+	:format(BUILD, #Upgrades, #TreeNodes, Core.format(state.gold)), 8)
