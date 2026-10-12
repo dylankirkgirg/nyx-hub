@@ -18,7 +18,7 @@ local NYX = "https://raw.githubusercontent.com/dylankirkgirg/nyx-hub/"
 
 -- Bumped to the commit each script was last verified green at. A stale
 -- /main/ URL is worse than no script: it loads a build you already fixed.
-local PIN = "a2cb8c3"
+local PIN = "db5291e"
 
 -- game-name match (case-insensitive substring)  ->  main.lua URL
 local GAMES = {

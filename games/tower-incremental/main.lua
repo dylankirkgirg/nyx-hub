@@ -32,7 +32,7 @@ local function root()   local c = char(); return c and c:FindFirstChild("Humanoi
 -- can be served from a CDN replica that is hours behind the push, and this
 -- script then loads a build that has already been fixed. Keep in step with
 -- PIN in ../../loader.lua.
-local REPO = "https://raw.githubusercontent.com/dylankirkgirg/nyx-hub/a2cb8c3/games/tower-incremental/"
+local REPO = "https://raw.githubusercontent.com/dylankirkgirg/nyx-hub/db5291e/games/tower-incremental/"
 local Core = loadstring(game:HttpGet(REPO .. "core.lua"))()
 
 local function notify(text, dur)
