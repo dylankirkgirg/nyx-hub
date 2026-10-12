@@ -1,19 +1,33 @@
 -- ═══════════════════════════════════════════════════════════
 --  NYX HUB — one loadstring. Detects your game, launches its script.
+--
+--  Load this loader from a COMMIT SHA, not from /main/:
 --  loadstring(game:HttpGet("https://raw.githubusercontent.com/dylankirkgirg/nyx-hub/main/loader.lua"))()
+--
+--  raw.githubusercontent sits behind a CDN that can hold a /main/ copy for
+--  hours after a push, so a /main/ URL can hand you code from a commit
+--  you already replaced — it did exactly that, serving a version that
+--  threw on load. SHA-pinned paths are content-addressed, so they cannot
+--  go stale. PIN below is the commit each game's script was last verified at.
 -- ═══════════════════════════════════════════════════════════
 
 local MPS       = game:GetService("MarketplaceService")
 local StarterGui= game:GetService("StarterGui")
 
--- game-name match (case-insensitive substring)  ->  raw main.lua URL
+local NYX = "https://raw.githubusercontent.com/dylankirkgirg/nyx-hub/"
+
+-- Bumped to the commit each script was last verified green at. A stale
+-- /main/ URL is worse than no script: it loads a build you already fixed.
+local PIN = "a2cb8c3"
+
+-- game-name match (case-insensitive substring)  ->  main.lua URL
 local GAMES = {
 	{ match = "anime dice", name = "Anime Dice",
 	  url = "https://raw.githubusercontent.com/dylankirkgirg/anime-dice/main/src/main.lua" },
 	{ match = "steal a", name = "Steal An Egg", -- catches "Steal a Brainrot"-style renames too
 	  url = "https://raw.githubusercontent.com/dylankirkgirg/steal-an-egg/main/src/main.lua" },
 	{ match = "tower incremental", name = "Tower Incremental",
-	  url = "https://raw.githubusercontent.com/dylankirkgirg/nyx-hub/main/games/tower-incremental/main.lua" },
+	  url = NYX .. PIN .. "/games/tower-incremental/main.lua" },
 	-- more games slot in here as we build them
 }
 
