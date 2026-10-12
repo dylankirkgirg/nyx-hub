@@ -12,6 +12,8 @@ local GAMES = {
 	  url = "https://raw.githubusercontent.com/dylankirkgirg/anime-dice/main/src/main.lua" },
 	{ match = "steal a", name = "Steal An Egg", -- catches "Steal a Brainrot"-style renames too
 	  url = "https://raw.githubusercontent.com/dylankirkgirg/steal-an-egg/main/src/main.lua" },
+	{ match = "tower incremental", name = "Tower Incremental",
+	  url = "https://raw.githubusercontent.com/dylankirkgirg/nyx-hub/main/games/tower-incremental/main.lua" },
 	-- more games slot in here as we build them
 }
 
