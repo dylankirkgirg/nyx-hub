@@ -23,27 +23,36 @@ core.lua      every decision that could be wrong without throwing
 test/core_spec.lua  run from this folder with: luau test/core_spec.lua
 ```
 
-`core.lua` holds the number formatter, cost maths, buy chooser, pacing jitter, world-target
+`core.lua` holds the number formatter, upgrade pricing, buy choosers, pacing jitter, world-target
 predicates and the full remote path table. It has no Roblox API calls in it, which is why it runs
-under plain `luau` and is covered by 32 assertions. `main.lua` fetches it over HTTP and only
+under plain `luau` and is covered by 46 assertions. `main.lua` fetches it over HTTP and only
 does the things that need the running game.
 
 ## What's built
 
-**Farm** — auto stairs, auto doors, buy/collect delay sliders.
+**Farm** — auto stairs, auto doors, buy/collect delay sliders. Stairs are priced by the game's own
+`StairConfig.costOf`, which is piecewise across seven growth bands rather than one flat multiplier —
+a flat 1.1 model prices floor 720 at 5.8e30 instead of 10.5 trillion, so nothing here re-derives it.
+Doors walk `DoorConfig.DOORS` in unlock order and check each one's own floor and currency.
 
-**Gather** — auto mine, auto chop, auto gather, auto deposit. Mining and chopping call the game's
-own `Activated` handler on the tool rather than firing the remote, so the payload is always the one
-the server expects.
+**Gather** — auto mine, auto chop, auto deposit, and a one-shot state sync. Mining and chopping call
+the game's own `Activated` handler on the tool rather than firing the remote, so the payload is always
+the one the server expects. Neither has a safe remote fallback: `MineBlock` takes a block index this
+script has no way to know, and there is no wood remote among the 31 at all, so with `getconnections`
+unavailable they do nothing rather than fire something wrong.
 
-**Upgrades** — auto buy upgrades and tree nodes. Both read their **id lists and costs out of the
-game's own `Shared.UpgradeConfig` and `Shared.TreeConfig` at runtime**, then buy the most expensive
-thing the balance covers. Nothing is hardcoded, so a patch that adds a tier doesn't break it.
+**Upgrades** — auto buy upgrades and tree nodes, both driven by the game's own config. Upgrade rows
+are `{baseCost, growth, cap, currency}`, so the price of the next one is `baseCost * growth^owned` and
+an upgrade at its cap drops out instead of being spammed forever. Tree nodes price flat but carry a
+`requires` chain across 566 rows, so buying cheapest-first would offer nodes whose parent is unowned;
+the walk takes the cheapest node whose parent is already owned. **Both are judged against the row's
+own currency** — an upgrade priced in embers cannot be paid for with gold.
 
 **Loot** — the eight loot systems (EmberWheel, Heart, Pearl, SalvageCrane, SkyBalloon, Stardust,
 Vault, Wish). Off by default, each on its own timer.
 
-**Shop** — auto potions, auto prize wheel, a redeem-code box.
+**Shop** — auto potions (fired with real ids from `PotionConfig.LIST`), auto prize wheel, a
+redeem-code box.
 
 **ESP** — ore veins, crystals, trees, essence orbs. These are `Highlight` objects on **named
 parts**, not raycasts. `Mine.IronOre` carries a `Veins` part that pays and a `Stone` part that
@@ -66,23 +75,33 @@ you look at when a feature greys out.
   place's tree, and faking it server-side isn't worth the attention.
 - **ESP on players.** No wallhack. The object ESP above is for gathering nodes.
 
-## What's unverified
+## What's verified on the wire
 
-The remote **names and paths are read off this place's ReplicatedStorage tree and are correct**.
-What isn't verified is the **payload each one expects** — we never captured a live call.
+Captured from OpenDex's Remote Spy while the user played the game:
 
-That matters for the ones that need arguments:
+| Remote | Payload | Confidence |
+|---|---|---|
+| `BuyStair` | `FireServer(floor)` — saw 73, 72, 71 | **confirmed** |
+| `UnlockDoor` | `FireServer("upgradeTree")` — a door id | **confirmed** |
+| `BuyTreeNode` | `FireServer("GoldMiddle1")` — a node id | **confirmed** |
+| `MineBlock` | `FireServer(<int>)` — block index | confirmed shape, index unknown |
+| `Essence` | `FireServer("sync")` — a command, not a purchase | **confirmed** |
+| `BuyUpgrade` | an upgrade id from `UpgradeConfig.BY_ID` | high — ids read from their table |
+| `BuyPotion` | a potion id from `PotionConfig.LIST` | high — ids read from their table |
+
+## What's still a guess
 
 | Remote | What we send | Confidence |
 |---|---|---|
-| `BuyUpgrade`, `BuyTreeNode` | an id taken from the game's own config | high — the id comes from their table |
-| `BuyStair`, `Rebirth`, `SpinWheel`, `BuyPotion` | no arguments | medium — likely zero-arg, unconfirmed |
-| `UnlockDoor` | `1..5` | low — door ids unconfirmed |
+| `SpinWheel` | no arguments | medium — PrizeWheel costs a flat 100000, wedge is server-side |
+| `Rebirth`, `RedeemCode`, `Totem`, `MineCycle`, `MineReset` | no arguments | medium |
+| `SmelterCollect/Deposit`, `StarforgeDeposit`, `RefractorDeposit` | no arguments | low |
+| `BuyTrail`, `EquipTrail` | no arguments | low |
 | the eight loot systems | no arguments | low |
 
-Everything zero-arg and low-confidence is a one-line fix in `fire(...)` calls in `main.lua`.
-To confirm: open OpenDex's Remote Spy, click the real button once, read the argument list, and put
-it in. Each is already wrapped so a bad guess fails silently rather than erroring the loop.
+To confirm any of them: open OpenDex's Remote Spy, click the real button once, read the argument
+list, put it in the `fire(...)` call. Each is one line. Where a wrong guess would be actively harmful
+rather than merely rejected, the call is simply not made.
 
 ## Risks
 
@@ -91,6 +110,8 @@ it in. Each is already wrapped so a bad guess fails silently rather than errorin
   tab is one toggle away and touches nothing on the server.
 - **Auto-buy sends real remote traffic** on a timer. Keep the delays human. Every loop here
   jitters its wait rather than firing on a fixed beat.
+- **Owned counts start at zero** each session, so the compounding price of an upgrade restarts low
+  and drifts upward as we buy. Every price is therefore an estimate for one session, never a write.
 - **The game ships an `AdminAction` and `AdminGive` remote.** We map both and never touch them.
 - This place updates often (last patched a day before this was written). The tolerant remote
   resolution means a rename greys a feature out instead of breaking the script — check the
@@ -99,8 +120,10 @@ it in. Each is already wrapped so a bad guess fails silently rather than errorin
 ## Testing
 
 ```sh
-cd tower-incremental
-luau test/core_spec.lua     # 32 assertions
-luau-compile main.lua   # syntax
-luau-compile core.lua
+cd nyx-hub/games/tower-incremental
+luau test/core_spec.lua       # 46 assertions
+luau-compile --null main.lua  # syntax
+luau-compile --null core.lua
 ```
+
+`luau-compile` writes bytecode to stdout without `--null`.

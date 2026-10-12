@@ -73,43 +73,6 @@ check("rates read like the game does", function()
 end)
 
 -- ───────────────────────────────────────────────────────────
--- cost maths
--- ───────────────────────────────────────────────────────────
-print("cost maths")
-
-check("scales geometrically from base and multiplier", function()
-	eq(Core.scaledCost(10, 1.5, 1), 10)  -- first costs base
-	eq(Core.scaledCost(10, 1.5, 2), 15)  -- then base * mult
-	eq(Core.scaledCost(10, 1.5, 3), 23)  -- 22.5 rounds up
-end)
-
-check("a fractional cost never leaks out as a fraction", function()
-	-- a cost that reads 11.5 in the UI but charges 12 is the kind of
-	-- off-by-one that makes a script look broken, so always round up
-	local c = Core.scaledCost(10, 1.15, 2)
-	eq(c, math.ceil(c), "cost was not a whole number")
-end)
-
-check("index below one clamps to base", function()
-	-- config tables are 1-indexed; a 0 slipping through should not
-	-- produce a cheaper-than-real stair and buy one the server rejects
-	eq(Core.scaledCost(10, 1.5, 0), 10)
-	eq(Core.scaledCost(10, 1.5, -5), 10)
-end)
-
-check("rounds a fractional cost up to a whole number", function()
-	-- these costs get compared against whole gold balances and shown
-	-- to the player; a 22.5 stair that displays as 22 but charges 23
-	-- is exactly the kind of off-by-one that reads as a broken script
-	eq(Core.scaledCost(10, 1.15, 2), 12) -- 11.5 -> 12
-end)
-
-check("total cost sums the whole climb", function()
-	-- 10, 15, 22.5->23, 33.75->34
-	eq(Core.totalCost(10, 1.5, 4), 10 + 15 + 23 + 34)
-end)
-
--- ───────────────────────────────────────────────────────────
 -- picking what to buy next
 -- ───────────────────────────────────────────────────────────
 print("pickBest")
@@ -169,6 +132,67 @@ check("empty or nil catalogue never throws", function()
 	eq(pick, nil)
 	eq(short, 0)
 	eq(select(1, Core.pickBest(nil, 1000)), nil)
+end)
+
+-- An upgrade priced in embers cannot be paid for with gold. Judging the
+-- whole catalogue against one balance is how a script ends up firing buys
+-- the server refuses every tick.
+check("each entry is judged against its own currency", function()
+	local MIXED = {
+		{ id = "goldCheap", cost = 100, currency = "gold" },
+		{ id = "emberFat",  cost = 900, currency = "embers" },
+		{ id = "silverMid", cost = 250, currency = "silver" },
+	}
+	local bag = { gold = 5000, silver = 9000, embers = 100 }
+
+	-- The most expensive row is priced in embers and we hold 100 of them.
+	-- Judged against the gold balance it would look affordable and win;
+	-- judged against its own currency it loses to the 250 silver row.
+	local pick = Core.pickBest(MIXED, 0, {
+		balance = function(c) return bag[c] or 0 end,
+	})
+	eq(pick.id, "silverMid")
+
+	-- With enough embers the same row does win.
+	bag.embers = 5000
+	pick = Core.pickBest(MIXED, 0, {
+		balance = function(c) return bag[c] or 0 end,
+	})
+	eq(pick.id, "emberFat")
+end)
+
+check("a per-currency buyer still reports a shortfall", function()
+	local MIXED = {
+		{ id = "a", cost = 100, currency = "gold" },
+		{ id = "b", cost = 900, currency = "gold" },
+	}
+	local bag = { gold = 10 }
+	local pick, short = Core.pickBest(MIXED, 0, {
+		balance = function(c) return bag[c] or 0 end,
+	})
+	eq(pick, nil)
+	eq(short, 90)
+end)
+
+check("without a balance function it behaves exactly as before", function()
+	local pick = Core.pickBest(SHOP, 999999)
+	eq(pick.id, "d")
+end)
+
+check("a currency the bag has never heard of is worth zero", function()
+	local bag = { gold = 99999 }
+	local row = { { id = "x", cost = 40, currency = "prisms" } }
+	local pick, short = Core.pickBest(row, 0, {
+		balance = function(c) return bag[c] or 0 end,
+	})
+	eq(pick, nil)
+	eq(short, 40) -- gold cannot buy prisms, no matter how much of it there is
+
+	bag.prisms = 40
+	pick = Core.pickBest(row, 0, {
+		balance = function(c) return bag[c] or 0 end,
+	})
+	eq(pick.id, "x")
 end)
 
 check("skips entries with an unusable cost", function()
@@ -244,11 +268,6 @@ check("the chop target is the trunk", function()
 	eq(Core.isTreePart("Root"), false)
 end)
 
-check("the tool's active part is its swing", function()
-	eq(Core.isToolSwing("Swing"), true)
-	eq(Core.isToolSwing("Handle"), false)
-end)
-
 check("essense orbs are found by their inner marker", function()
 	-- Currency.Essence nests the real marker under an EssenceInner part
 	eq(Core.isEssenceName("EssenceInner"), true)
@@ -291,6 +310,130 @@ check("known remotes are all still accounted for", function()
 	eq(Core.REMOTES.BuyStair ~= nil, true)
 	eq(Core.REMOTES.Rebirth ~= nil, true)
 	eq(Core.REMOTES.UnlockDoor ~= nil, true)
+end)
+
+-- ───────────────────────────────────────────────────────────
+-- upgrade price
+--
+-- UpgradeConfig rows are {baseCost, growth, cap, currency}. The real
+-- nth price is baseCost * growth^(owned) -- verified against the game:
+-- moreMoney baseCost=10 growth=1.15, speedBuff baseCost=100 growth=2.2.
+-- ───────────────────────────────────────────────────────────
+print("upgradePrice")
+
+check("first purchase is the base cost", function()
+	local row = { baseCost = 10, growth = 1.15, cap = 100 }
+	eq(Core.upgradePrice(row, 0), 10)
+end)
+
+check("price compounds by growth per level owned", function()
+	local row = { baseCost = 10, growth = 1.15, cap = 100 }
+	eq(Core.upgradePrice(row, 1), 12)   -- ceil(11.5)
+	eq(Core.upgradePrice(row, 2), 14)   -- ceil(13.225)
+	eq(Core.upgradePrice(row, 3), 16)   -- ceil(15.20875)
+end)
+
+check("a steep growth row steps hard", function()
+	-- speedBuff baseCost=100 growth=2.2 cap=5
+	local row = { baseCost = 100, growth = 2.2, cap = 5 }
+	eq(Core.upgradePrice(row, 0), 100)
+	eq(Core.upgradePrice(row, 1), 220)
+	eq(Core.upgradePrice(row, 2), 484)  -- exactly 484; the raw multiply reads 484.00000000000006
+	eq(Core.upgradePrice(row, 3), 1065)  -- ceil(1064.8)
+end)
+
+check("a capped upgrade reports nothing rather than a price it won't sell", function()
+	local row = { baseCost = 10, growth = 1.15, cap = 3 }
+	eq(Core.upgradePrice(row, 3), nil)
+end)
+
+check("growth 1 means one flat price forever", function()
+	-- the keepers are growth=1 cap=1 permanent
+	local row = { baseCost = 500, growth = 1, cap = 1 }
+	eq(Core.upgradePrice(row, 0), 500)
+	eq(Core.upgradePrice(row, 1), nil)
+end)
+
+check("a flat-cost row without growth still prices once", function()
+	eq(Core.upgradePrice({ baseCost = 42 }, 0), 42)
+end)
+
+check("a malformed row prices to nil instead of throwing", function()
+	eq(Core.upgradePrice(nil, 0), nil)
+	eq(Core.upgradePrice({}, 0), nil)
+	eq(Core.upgradePrice({ baseCost = "free" }, 0), nil)
+	eq(Core.upgradePrice({ baseCost = 10, growth = 0 }, 0), nil)
+end)
+
+check("the next price still compounds past level cap when cap is absent", function()
+	eq(Core.upgradePrice({ baseCost = 10, growth = 2 }, 4), 160)
+end)
+
+-- ───────────────────────────────────────────────────────────
+-- tree dependencies
+--
+-- TreeConfig.NODES has 566 rows; each carries a `requires` naming the
+-- node above it. Cheapest-first therefore buys leaves whose parent is
+-- still unowned and stalls. Real rows:
+--   GoldMiddle1 tier1 root   cost=100 silver
+--   GoldLeft1   tier2 left   cost=250 requires=GoldMiddle1
+--   LuckLeft1   tier3 left   cost=600 requires=GoldLeft1
+-- ───────────────────────────────────────────────────────────
+print("treeOrder")
+
+local GOLD_NODES = {
+	{ id = "GoldMiddle1", cost = 100, tier = 1, currency = "silver", requires = nil },
+	{ id = "GoldLeft1",   cost = 250, tier = 2, currency = "silver", requires = "GoldMiddle1" },
+	{ id = "LuckLeft1",   cost = 600, tier = 3, currency = "silver", requires = "GoldLeft1" },
+}
+
+check("a node whose parent is unowned is not offered", function()
+	local pick = Core.nextNode(GOLD_NODES, {}, function() return true end)
+	eq(pick.id, "GoldMiddle1")
+end)
+
+check("once the parent is owned the next link in the chain unlocks", function()
+	local owned = { GoldMiddle1 = true }
+	local pick = Core.nextNode(GOLD_NODES, owned, function() return true end)
+	eq(pick.id, "GoldLeft1")
+end)
+
+check("the chain walks all the way down", function()
+	local owned = { GoldMiddle1 = true, GoldLeft1 = true }
+	local pick = Core.nextNode(GOLD_NODES, owned, function() return true end)
+	eq(pick.id, "LuckLeft1")
+end)
+
+check("the cheapest unlocked node wins, not the most expensive", function()
+	-- LuckLeft1 (600) is unlocked and affordable but is three tiers deep;
+	-- buying it over GoldLeft1 (250) would spend the wrong currency first.
+	local owned = { GoldMiddle1 = true }
+	local pick = Core.nextNode(GOLD_NODES, owned, function(entry) return entry.cost <= 300 end)
+	eq(pick.id, "GoldLeft1")
+end)
+
+check("a node in its own currency the player cannot afford is skipped", function()
+	local pick = Core.nextNode(GOLD_NODES, {}, function(entry) return entry.currency ~= "silver" end)
+	eq(pick, nil)
+end)
+
+check("no unlocked affordable node returns nil, not a throw", function()
+	eq(Core.nextNode(GOLD_NODES, { GoldMiddle1 = true, GoldLeft1 = true, LuckLeft1 = true },
+		function() return true end), nil)
+	eq(Core.nextNode({}, {}, function() return true end), nil)
+	eq(Core.nextNode(nil, {}, function() return true end), nil)
+end)
+
+check("a requires pointing at a node that does not exist is simply locked", function()
+	local rows = { { id = "Orphan", cost = 10, tier = 1, requires = "NoSuchNode" } }
+	eq(Core.nextNode(rows, {}, function() return true end), nil)
+end)
+
+check("a node already owned is never re-offered", function()
+	local owned = { GoldMiddle1 = true }
+	local pick = Core.nextNode(GOLD_NODES, owned, function() return true end)
+	eq(pick.id, "GoldLeft1")
+	eq(pick.id == "GoldMiddle1", false)
 end)
 
 -- ───────────────────────────────────────────────────────────

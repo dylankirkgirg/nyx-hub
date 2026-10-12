@@ -46,32 +46,6 @@ function Core.format(n)
 end
 
 -- ═══════════════════════════════════════════════════════════
---  cost maths
--- ═══════════════════════════════════════════════════════════
-
---- Cost of the nth tier, given a base cost and a per-tier multiplier.
---- Always rounds up: a fractional cost that displays as 11 but charges 12
---- is exactly the sort of off-by-one that makes a script look broken, and
---- rounding up can never under-pay into a server-side rejection.
-function Core.scaledCost(base, mult, index)
-	index = math.max(1, math.floor(tonumber(index) or 1))
-	base = tonumber(base) or 0
-	mult = tonumber(mult) or 1
-	return math.ceil(base * (mult ^ (index - 1)))
-end
-
---- What it takes to own every tier from 1 to n. Used to answer "how far
---- can I actually get with what I'm holding" without iterating the whole
---- table in the UI frame.
-function Core.totalCost(base, mult, n)
-	local sum = 0
-	for i = 1, math.max(0, math.floor(tonumber(n) or 0)) do
-		sum += Core.scaledCost(base, mult, i)
-	end
-	return sum
-end
-
--- ═══════════════════════════════════════════════════════════
 --  choosing what to buy
 -- ═══════════════════════════════════════════════════════════
 
@@ -88,7 +62,21 @@ end
 function Core.pickBest(entries, balance, opts)
 	opts = opts or {}
 	if type(entries) ~= "table" then return nil, 0 end
-	if type(balance) ~= "number" or balance ~= balance then return nil, 0 end
+
+	-- opts.balance: currency -> amount held. When it is absent every
+	-- entry is judged against the single balance argument, which is the
+	-- old behaviour and still right when the whole shop is one currency.
+	-- When it is present each row is judged against its own, because an
+	-- upgrade priced in embers cannot be paid for with gold.
+	local hasBag = type(opts.balance) == "function"
+	if not hasBag and (type(balance) ~= "number" or balance ~= balance) then return nil, 0 end
+
+	local function available(entry)
+		if not hasBag then return balance end
+		local ok, amount = pcall(opts.balance, entry.currency)
+		if ok and type(amount) == "number" and amount == amount then return amount end
+		return 0
+	end
 
 	local limit = opts.maxTier
 	if type(limit) ~= "number" or limit < 1 then limit = math.huge end
@@ -105,15 +93,75 @@ function Core.pickBest(entries, balance, opts)
 		-- its siblings; one bad row must not stop the whole auto-buy.
 		if type(cost) == "number" and cost == cost and cost >= 0 then
 			if not cheapest or cost < cheapest.cost then cheapest = entry end
-			if cost <= balance and (not best or cost > best.cost) then
+			if cost <= available(entry) and (not best or cost > best.cost) then
 				best = entry
 			end
 		end
 	end
 
 	if best then return best, 0 end
-	if cheapest then return nil, math.ceil(cheapest.cost - balance) end
+	if cheapest then
+		local gap = math.ceil(cheapest.cost - available(cheapest))
+		return nil, gap > 0 and gap or 0
+	end
 	return nil, 0
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  priced from a config row
+-- ═══════════════════════════════════════════════════════════
+
+--- Price of the next level of an UpgradeConfig row.
+---
+--- Rows are { baseCost, growth, cap, currency }. The nth purchase costs
+--- baseCost * growth^(owned) — read straight off this place's own
+--- UpgradeConfig, e.g. moreMoney baseCost=10 growth=1.15 cap=100 and
+--- speedBuff baseCost=100 growth=2.2 cap=5. A row past its cap returns
+--- nil rather than a price the server will refuse, which is what stops
+--- a maxed upgrade being spammed forever.
+function Core.upgradePrice(row, owned)
+	if type(row) ~= "table" then return nil end
+	local base = tonumber(row.baseCost)
+	local growth = tonumber(row.growth) or 1
+	if base == nil or base < 0 or growth < 1 then return nil end
+
+	owned = math.max(0, math.floor(tonumber(owned) or 0))
+	local cap = tonumber(row.cap)
+	if cap ~= nil and owned >= cap then return nil end
+
+	-- The epsilon absorbs float representation error. 100 * 2.2 comes out
+	-- of the multiply as 220.00000000000003, and a bare ceil would price a
+	-- 220 upgrade at 221 — an off-by-one the server never charged.
+	return math.ceil(base * (growth ^ owned) - 1e-9)
+end
+
+--- Next tree node to buy, respecting the `requires` chain.
+---
+--- TreeConfig.NODES is 566 rows and each one names the node above it, so
+--- buying cheapest-first would offer leaves whose parent is still unowned
+--- and the server would reject every one. Walks for nodes whose parent is
+--- already owned, then takes the cheapest of those.
+---
+--- nodes:   array of { id, cost, currency, tier, requires }
+--- owned:   set of ids already bought
+--- canAfford: entry -> boolean, so the caller owns the balance lookup
+function Core.nextNode(nodes, owned, canAfford)
+	if type(nodes) ~= "table" or type(canAfford) ~= "function" then return nil end
+	owned = owned or {}
+
+	local best = nil
+	for _, node in ipairs(nodes) do
+		if type(node) == "table" and type(node.id) == "string" and type(node.cost) == "number" then
+			local needs = node.requires
+			-- A requires pointing at a node we have never heard of is just
+			-- locked. Not a reason to stop the loop.
+			local unlocked = needs == nil or owned[needs] == true
+			if not owned[node.id] and unlocked and canAfford(node) then
+				if best == nil or node.cost < best.cost then best = node end
+			end
+		end
+	end
+	return best
 end
 
 -- ═══════════════════════════════════════════════════════════
@@ -147,8 +195,6 @@ function Core.isCrystalName(name)
 end
 
 function Core.isTreePart(name) return name == "Trunk" end
-
-function Core.isToolSwing(name) return name == "Swing" end
 
 function Core.isEssenceName(name) return name == "EssenceInner" end
 

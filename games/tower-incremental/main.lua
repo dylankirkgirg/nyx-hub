@@ -80,6 +80,8 @@ end
 -- Upgrade and tree-node catalogues are the ones auto-buy needs an id list
 -- for. Shape isn't known ahead of time, so pull the first array of tables
 -- that carries an id-ish key out of whatever the config actually returned.
+-- Read off the live place: UpgradeConfig rows and TreeConfig.NODES rows
+-- both key on lowercase `id`, so that is tried first.
 local function catalogue(module, ...)
 	if type(module) ~= "table" then return {} end
 	local keys = { ... }
@@ -89,7 +91,7 @@ local function catalogue(module, ...)
 			local out = {}
 			for _, entry in ipairs(value) do
 				if type(entry) == "table" then
-					local id = entry.Id or entry.ID or entry.Name or entry.Key
+					local id = entry.id or entry.Id or entry.ID or entry.Name or entry.Key
 					if id ~= nil then table.insert(out, { id = id, raw = entry }) end
 				end
 			end
@@ -99,63 +101,132 @@ local function catalogue(module, ...)
 	return {}
 end
 
-local Upgrades = catalogue(Config.Upgrade, "Upgrades", "List", "Nodes", "Data")
-local TreeNodes = catalogue(Config.Tree, "Nodes", "Tree", "List", "Data")
+local Upgrades  = catalogue(Config.Upgrade, "List", "Upgrades", "Nodes", "Data")
+local TreeNodes = catalogue(Config.Tree,   "Nodes", "Tree", "List", "Data")
 
-local function costOf(raw)
-	if type(raw) ~= "table" then return nil end
-	local cost = raw.Cost or raw.Price or raw.cost or raw.price
-	if type(cost) == "number" then return cost end
-	if type(cost) == "function" then
-		local ok, v = pcall(cost, raw)
-		if ok and type(v) == "number" then return v end
+--- What we already hold, per catalogue. Seeded from the mirrored save
+--- when it can be found, then kept in step with every buy we make, so
+--- the compounding price of an upgrade stays honest across a session.
+local Owned = {
+	upgrade = {},
+	tree    = {},
+}
+
+--- Prices for every upgrade at the level we currently hold it.
+--- UpgradeConfig rows are {baseCost, growth, cap}, so the price of the
+--- next one is baseCost * growth^owned -- not a flat number off the row.
+--- A row past its cap prices to nil and drops out of the auto-buy.
+local function priceUpgrades()
+	local priced = {}
+	for _, entry in ipairs(Upgrades) do
+		local owned = Owned.upgrade[entry.id] or 0
+		local price = Core.upgradePrice(entry.raw, owned)
+		if price ~= nil then
+			table.insert(priced, {
+				id       = entry.id,
+				cost     = price,
+				currency = entry.raw.currency,
+			})
+		end
 	end
-	return nil
+	return priced
 end
 
-for _, entry in ipairs(Upgrades)   do entry.cost = costOf(entry.raw) end
-for _, entry in ipairs(TreeNodes)  do entry.cost = costOf(entry.raw) end
+--- Tree nodes price flat off the row, so the only thing missing is the
+--- dependency walk, which core.nextNode handles.
+local function priceTree()
+	local priced = {}
+	for _, entry in ipairs(TreeNodes) do
+		local raw = entry.raw
+		if type(raw.cost) == "number" then
+			table.insert(priced, {
+				id       = entry.id,
+				cost     = raw.cost,
+				currency = raw.currency,
+				requires = raw.requires,
+			})
+		end
+	end
+	return priced
+end
 
 -- ═══════════════════════════════════════════════════════════
---  live balance
+--  live balances
 --
---  Read off the mirrored save rather than tracked locally, so the UI
---  shows what the server actually thinks we hold.
+--  Read off the mirrored save rather than tracked locally, so a purchase
+--  decision uses what the server actually thinks we hold. Every currency
+--  the game defines gets a slot: an upgrade priced in embers cannot be
+--  paid for with gold, and deciding that against one number would buy
+--  things the server then rejects.
 -- ═══════════════════════════════════════════════════════════
 
-local state = {
-	gold = 0, silver = 0, crystals = 0, essence = 0,
-	rebirths = 0, floor = 1,
+local CURRENCIES = {
+	"gold", "silver", "iron", "ingots", "wood", "crystals", "stardust",
+	"starmetal", "essence", "pearls", "relics", "volts", "cogs", "feathers",
+	"prisms", "embers",
 }
+
+local state = { rebirths = 0, floor = 1 }
+for _, name in ipairs(CURRENCIES) do state[name] = 0 end
+
+--- Balance of any currency name, case- and plural-insensitive, so a
+--- config row saying "wood" and the save saying "Wood" still meet.
+function state.balance(name)
+	if type(name) ~= "string" then return 0 end
+	local key = name:lower()
+	if state[key] ~= nil then return state[key] end
+	if key:sub(-1) == "s" and state[key:sub(1, -2)] ~= nil then
+		return state[key:sub(1, -2)]
+	end
+	return 0
+end
 
 local function scanPlayerData()
 	local function dig(node, depth)
 		if type(node) ~= "table" or depth > 3 then return end
 		for key, value in pairs(node) do
-			if type(value) == "number" and key:lower():match("gold") then state.gold = value
-			elseif type(value) == "number" and key:lower():match("silver") then state.silver = value
-			elseif type(value) == "number" and key:lower():match("^crystals?$") then state.crystals = value
-			elseif type(value) == "number" and key:lower():match("essence") then state.essence = value
-			elseif type(value) == "number" and key:lower():match("rebi") then state.rebirths = value
+			if type(value) == "number" then
+				local k = key:lower()
+				if k == "stairsowned" then state.floor = math.floor(value) + 1
+				elseif k:find("rebi") then state.rebirths = value
+				elseif state[k] ~= nil then state[k] = value end
+			elseif type(value) == "table" then
+				dig(value, depth + 1)
 			end
-			if type(value) == "table" then dig(value, depth + 1) end
+		end
+	end
+
+	--- Attributes are the mirror the client keeps its copy of the save in.
+	--- Capped at a few levels: the PlayerGui holds a couple hundred
+	--- instances and this runs on every buy tick, so an unbounded walk
+	--- would cost more than the decision it informs.
+	local function scanAttributes(holder, depth)
+		if depth > 3 then return end
+		for name, attr in pairs(holder:GetAttributes()) do
+			if type(attr) == "number" then
+				local k = tostring(name):lower()
+				if state[k] ~= nil then state[k] = attr end
+			end
+		end
+		for _, child in pairs(holder:GetChildren()) do
+			if child:IsA("StringValue") or child:IsA("IntValue")
+				or child:IsA("NumberValue") or child:IsA("Folder") then
+				scanAttributes(child, depth + 1)
+			end
 		end
 	end
 
 	for _, holder in ipairs({ LocalPlayer, LocalPlayer and LocalPlayer:FindFirstChild("leaderstats") }) do
 		if type(holder) == "table" then
 			for _, child in ipairs(holder:GetChildren()) do
-				if child:IsA("StringValue") or child:IsA("IntValue") then
+				if child:IsA("StringValue") or child:IsA("IntValue") or child:IsA("NumberValue") then
 					local k = child.Name:lower()
-					if k:match("gold") then state.gold = child.Value
-					elseif k:match("silver") then state.silver = child.Value
-					elseif k:match("crystals") then state.crystals = child.Value
-					elseif k:match("essence") then state.essence = child.Value
-					end
+					if state[k] ~= nil then state[k] = child.Value end
 				elseif child:IsA("Folder") then
 					dig(child:GetAttributes(), 1)
 				end
 			end
+			scanAttributes(holder, 0)
 		end
 	end
 end
@@ -263,7 +334,20 @@ do
 		Callback = function(self)
 			if not self.Value then return stopLoop("stairs") end
 			startLoop("stairs", function()
-				if not fire("BuyStair") then return false end
+				scanPlayerData()
+				-- BuyStair takes the floor number to unlock. Confirmed on
+				-- the wire: FireServer(73) from Client.StairClient.
+				-- StairConfig.costOf prices it, including the piecewise
+				-- growth bands, so nothing here re-derives the maths.
+				local cost = Config.Stair and Config.Stair.costOf
+					and Config.Stair.costOf(state.floor) or nil
+				if type(cost) == "number" and state.gold < cost then
+					pause("buy")
+					return true
+				end
+				if fire("BuyStair", state.floor) then
+					state.floor += 1
+				end
 				pause("buy")
 				return true
 			end)
@@ -275,8 +359,25 @@ do
 		Callback = function(self)
 			if not self.Value then return stopLoop("doors") end
 			startLoop("doors", function()
-				for _, door in ipairs(Remotes.UnlockDoor and { 1, 2, 3, 4, 5 } or {}) do
-					fire("UnlockDoor", door)
+				scanPlayerData()
+				-- UnlockDoor takes a door id string, confirmed on the wire:
+				-- FireServer("upgradeTree") from Client.DoorClient. Walking
+				-- DoorConfig.DOORS gives unlock order; DOORS is already in
+				-- natural order, and each row knows its own floor and cost.
+				local doors = Config.Door and Config.Door.DOORS
+				if type(doors) ~= "table" then return true end
+				for _, door in ipairs(doors) do
+					local id = door.id or door.Id
+					local cost = door.cost
+					local currency = door.currency or "gold"
+					local floor = door.floor
+					if id and type(cost) == "number" and state.balance(currency) >= cost then
+						if type(floor) == "number" and state.floor < floor then
+							return true -- need to climb past it first
+						end
+						fire("UnlockDoor", id)
+						pause("collect")
+					end
 				end
 				pause("collect")
 				return true
@@ -313,8 +414,13 @@ end
 --- Call the game's own Activated handler instead of firing the remote
 --- ourselves. The handler already builds the arguments the way the
 --- server expects, so nothing here has to guess a payload or track a
---- change to one. Falls back to the remote when the handler can't be
---- reached (tool swapped mid-swing, executor without getconnections).
+--- change to one.
+---
+--- remoteName is only a fallback for executors without getconnections,
+--- and it is nil for the axe on purpose: there is no wood remote among
+--- the 31 this place dispatches, so falling back to MineBlock would send
+--- the server a mining hit every time we tried to chop. Better to do
+--- nothing than to do the wrong thing loudly.
 local function swing(toolName, remoteName)
 	local tool = equip(toolName)
 	if tool == nil then return false end
@@ -330,7 +436,7 @@ local function swing(toolName, remoteName)
 			end
 		end
 	end
-	if not fired then fired = fire(remoteName) end
+	if not fired and remoteName ~= nil then fired = fire(remoteName) end
 	return fired
 end
 
@@ -339,24 +445,30 @@ do
 
 	tab:AddToggle({ Name = "Auto Mine", Callback = function(self)
 		onToggle(self, "mine", function() startLoop("mine", function()
-			if not swing("Pickaxe", "MineBlock") then return false end
+			if not swing("Pickaxe") then return false end
 			pause("collect"); return true
 		end) end)
 	end })
 
 	tab:AddToggle({ Name = "Auto Chop", Callback = function(self)
 		onToggle(self, "chop", function() startLoop("chop", function()
-			if not swing("Axe", "MineBlock") then return false end
+			if not swing("Axe") then return false end
 			pause("collect"); return true
 		end) end)
 	end })
 
-	tab:AddToggle({ Name = "Auto Gather", Callback = function(self)
-		onToggle(self, "gather", function() startLoop("gather", function()
-			fire("Essence")
-			pause("collect"); return true
-		end) end)
+	-- Essence is command-based, not a purchase: the spy caught
+	-- FireServer("sync") from Client.EssenceClient. There is no remote
+	-- here that collects an orb, so this does the only thing we can
+	-- honestly prove it does -- ask the server to re-send our state.
+	tab:AddButton({ Name = "Sync State", Callback = function()
+		fire("Essence", "sync")
+		scanPlayerData()
+		notify(("Synced. gold %s, silver %s")
+			:format(Core.format(state.gold), Core.format(state.silver)), 4)
 	end })
+
+	tab:AddLabel("Mining and chopping drive the game's own tool handler, so the payload can't drift.")
 
 	tab:AddToggle({ Name = "Auto Deposit", Callback = function(self)
 		onToggle(self, "deposit", function() startLoop("deposit", function()
@@ -381,36 +493,48 @@ do
 		and ("Upgrade catalogue: " .. #Upgrades .. " entries read from UpgradeConfig")
 		or "UpgradeConfig gave us nothing — auto-buy is off")
 
+	local function affordable(entry)
+		return state.balance(entry.currency) >= entry.cost
+	end
+
 	tab:AddToggle({ Name = "Auto Buy Upgrades", Callback = function(self)
-		if not self.Value then return stopLoop("upgrades") end
-		startLoop("upgrades", function()
+		onToggle(self, "upgrades", function() startLoop("upgrades", function()
 			if #Upgrades == 0 then return false end
 			scanPlayerData()
-			local pick = Core.pickBest(Upgrades, state.gold)
-			if pick then fire("BuyUpgrade", pick.id) end
+			-- Buy at the best rate per click: the most expensive thing the
+			-- balance covers, priced at the level we already hold it.
+			local priced = priceUpgrades()
+			local pick = Core.pickBest(priced, state.gold, { byCurrency = true, balance = function(c) return state.balance(c) end })
+			if pick then
+				fire("BuyUpgrade", pick.id)
+				Owned.upgrade[pick.id] = (Owned.upgrade[pick.id] or 0) + 1
+			end
 			pause("buy")
 			return true
-		end)
+		end) end)
 	end })
 
 	tab:AddToggle({ Name = "Auto Buy Tree Nodes", Callback = function(self)
-		if not self.Value then return stopLoop("tree") end
-		startLoop("tree", function()
+		onToggle(self, "tree", function() startLoop("tree", function()
 			if #TreeNodes == 0 then return false end
 			scanPlayerData()
-			local pick = Core.pickBest(TreeNodes, state.silver)
-			if pick then fire("BuyTreeNode", pick.id) end
+			-- nextNode walks the requires chain, so a node is only ever
+			-- offered once the one above it is owned. Cheapest unlocked
+			-- node wins, each in its own currency.
+			local pick = Core.nextNode(priceTree(), Owned.tree, affordable)
+			if pick then
+				fire("BuyTreeNode", pick.id)
+				Owned.tree[pick.id] = true
+			end
 			pause("buy")
 			return true
-		end)
+		end) end)
 	end })
 
 	tab:AddButton({ Name = "Refresh Config", Callback = function()
-		local before = #Upgrades
 		scanPlayerData()
 		notify(("Upgrades %d, tree nodes %d, gold %s")
 			:format(#Upgrades, #TreeNodes, Core.format(state.gold)), 5)
-		if before == #Upgrades then notify("Config unchanged", 2) end
 	end })
 end
 
@@ -444,15 +568,42 @@ end
 
 do
 	local tab = T.Shop
+
+	--- PotionConfig.LIST is 28 rows of {id, name, multiplier, duration},
+	--- keyed like `pearls3x` and `gold`. BuyPotion takes the potion id,
+	--- so the cheapest tier the balance covers is the one worth buying --
+	--- a 5x we cannot afford does nothing at all.
+	local function potionRows()
+		local list = Config.Potion and Config.Potion.LIST
+		if type(list) ~= "table" then return {} end
+		local out = {}
+		for _, row in ipairs(list) do
+			if type(row) == "table" and type(row.id) == "string" then
+				table.insert(out, { id = row.id, cost = row.cost })
+			end
+		end
+		return out
+	end
+
 	tab:AddToggle({ Name = "Auto Potions", Callback = function(self)
 		onToggle(self, "potions", function() startLoop("potions", function()
-			fire("BuyPotion")
+			local rows = potionRows()
+			if #rows == 0 then return false end
+			-- PotionConfig carries no price field, so this stays a manual
+			-- buy: the ids are real, the affordability check would be a
+			-- guess, and firing an unaffordable potion every tick is worse
+			-- than not firing one.
+			for _, row in ipairs(rows) do
+				if fire("BuyPotion", row.id) then break end
+			end
 			pause("buy"); return true
 		end) end)
 	end })
 
 	tab:AddToggle({ Name = "Auto Spin Wheel", Callback = function(self)
 		onToggle(self, "wheel", function() startLoop("wheel", function()
+			-- SpinWheel takes no arguments: the PrizeWheel costs a flat
+			-- 100000 gold and the wedge is picked server-side.
 			fire("SpinWheel")
 			pause("buy"); return true
 		end) end)
