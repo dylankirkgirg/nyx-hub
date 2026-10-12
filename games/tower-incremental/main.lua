@@ -331,6 +331,10 @@ local T = {
 	Settings = Window:AddTab({ Name = "Settings", Icon = "settings" }),
 }
 
+-- Deliberately at the very end, after every tab is populated. Show() hands
+-- the content pane to that tab, so calling it early would show an empty
+-- Farm and leave the other twelve tabs populated but never activated.
+
 -- ═══════════════════════════════════════════════════════════
 --  FARM
 -- ═══════════════════════════════════════════════════════════
@@ -1197,6 +1201,8 @@ do
 	tab:AddButton({ Name = "Load Config", Callback = function() SaveManager:Load() notify("Loaded", 2) end })
 	tab:AddButton({ Name = "Destroy Window", Callback = function() Window:Destroy() end })
 end
+
+T.Farm:Show()
 
 scanPlayerData()
 notify(("Nyx ready — %d upgrades, %d tree nodes, %s gold")
