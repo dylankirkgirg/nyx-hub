@@ -132,8 +132,8 @@ functions rather than a remote we would have to invent a payload for:
 ## Layout and verification
 
 ```
-main.lua        1187 lines   Roblox side
-core.lua         380 lines   pure logic, no Roblox API
+main.lua        1196 lines   Roblox side
+core.lua         387 lines   pure logic, no Roblox API
 test/core_spec.lua           55 assertions
 ```
 
