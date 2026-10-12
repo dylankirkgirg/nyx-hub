@@ -1,129 +1,162 @@
 # Tower Incremental — Nyx
 
-Script for **[UPD7] Tower Incremental** by Lucky CStudios (placeId `75766778174856`).
+Script for `[UPD7] Tower Incremental` (Lucky CStudios, placeId `75766778174856`,
+universeId `10765067592`).
 
-Obsidian UI, dark rose skin, shared with every other Nyx script through `nyx-hub`.
-
-## Install
-
-Drop `loader.lua` in Opiumware's autoexec folder, or run the loadstring directly:
+Loaded by `nyx-hub/loader.lua`. To run it directly:
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/dylankirkgirg/nyx-hub/main/loader.lua"))()
 ```
 
-RightShift toggles the window.
+---
 
-## Layout
+## How this was built
 
-```
-nyx-hub/loader.lua        the loadstring entry point — the hub, not this game
-main.lua      everything that needs the live game
-core.lua      every decision that could be wrong without throwing
-test/core_spec.lua  run from this folder with: luau test/core_spec.lua
-```
+Recon was done with OpenDex against a live session, not against a wiki or a
+public API. Three things came out of that and they shape everything below.
 
-`core.lua` holds the number formatter, upgrade pricing, buy choosers, pacing jitter, world-target
-predicates and the full remote path table. It has no Roblox API calls in it, which is why it runs
-under plain `luau` and is covered by 46 assertions. `main.lua` fetches it over HTTP and only
-does the things that need the running game.
+**The decompiler is dead on this place.** Every script reads back as
+`lines: 1, functions: 0`, `source` returns `failed to decompile script`, and
+`search` matches nothing — including for `FireServer`. All static analysis is a
+dead end here. Confirmed three separate ways before switching approach.
 
-## What's built
+**Every remote goes through one generic dispatcher.** `Shared.Remotes` names
+31 remotes, but no script references any of them by name — they all funnel
+through `NetworkerClient.fire()`. That is exactly why name search returned
+nothing.
 
-**Farm** — auto stairs, auto doors, buy/collect delay sliders. Stairs are priced by the game's own
-`StairConfig.costOf`, which is piecewise across seven growth bands rather than one flat multiplier —
-a flat 1.1 model prices floor 720 at 5.8e30 instead of 10.5 trillion, so nothing here re-derives it.
-Doors walk `DoorConfig.DOORS` in unlock order and check each one's own floor and currency.
+**Remote Spy is the only working lens.** Arguments do not exist in the object
+tree; they exist at the moment of the call. Everything below marked *verified*
+was captured that way.
 
-**Gather** — auto mine, auto chop, auto deposit, and a one-shot state sync. Mining and chopping call
-the game's own `Activated` handler on the tool rather than firing the remote, so the payload is always
-the one the server expects. Neither has a safe remote fallback: `MineBlock` takes a block index this
-script has no way to know, and there is no wood remote among the 31 at all, so with `getconnections`
-unavailable they do nothing rather than fire something wrong.
-
-**Upgrades** — auto buy upgrades and tree nodes, both driven by the game's own config. Upgrade rows
-are `{baseCost, growth, cap, currency}`, so the price of the next one is `baseCost * growth^owned` and
-an upgrade at its cap drops out instead of being spammed forever. Tree nodes price flat but carry a
-`requires` chain across 566 rows, so buying cheapest-first would offer nodes whose parent is unowned;
-the walk takes the cheapest node whose parent is already owned. **Both are judged against the row's
-own currency** — an upgrade priced in embers cannot be paid for with gold.
-
-**Loot** — the eight loot systems (EmberWheel, Heart, Pearl, SalvageCrane, SkyBalloon, Stardust,
-Vault, Wish). Off by default, each on its own timer.
-
-**Shop** — auto potions (fired with real ids from `PotionConfig.LIST`), auto prize wheel, a
-redeem-code box.
-
-**ESP** — ore veins, crystals, trees, essence orbs. These are `Highlight` objects on **named
-parts**, not raycasts. `Mine.IronOre` carries a `Veins` part that pays and a `Stone` part that
-doesn't, and a tree's decoration parts all sit beside the `Trunk` that actually takes a hit.
-
-**Recon** — reports which remotes resolved this session and which configs loaded. This is the tab
-you look at when a feature greys out.
-
-**Player** — walk speed, jump, gravity, noclip, fly, teleport to the highest stair.
-
-## Deliberately NOT built
-
-- **Writing balances.** The game keeps saves behind ProfileStore, server-side and profile-locked.
-  A client-side write does nothing except get you flagged.
-- **Global `__namecall` hooking.** That approach kicked us in Steal An Egg. Nothing here hooks
-  anything at the global level.
-- **Auto-redeem of leaked codes, auto-join, anything that talks to other players.** GiftAnswer,
-  GiftIntent and LeaderboardUpdate exist and are mapped, unused.
-- **Anti-AFK.** It's a remote in most scripts of these hubs but there's no AFK remote in this
-  place's tree, and faking it server-side isn't worth the attention.
-- **ESP on players.** No wallhack. The object ESP above is for gathering nodes.
+---
 
 ## What's verified on the wire
 
-Captured from OpenDex's Remote Spy while the user played the game:
+Captured by Remote Spy, with the client script it came from.
 
-| Remote | Payload | Confidence |
-|---|---|---|
-| `BuyStair` | `FireServer(floor)` — saw 73, 72, 71 | **confirmed** |
-| `UnlockDoor` | `FireServer("upgradeTree")` — a door id | **confirmed** |
-| `BuyTreeNode` | `FireServer("GoldMiddle1")` — a node id | **confirmed** |
-| `MineBlock` | `FireServer(<int>)` — block index | confirmed shape, index unknown |
-| `Essence` | `FireServer("sync")` — a command, not a purchase | **confirmed** |
-| `BuyUpgrade` | an upgrade id from `UpgradeConfig.BY_ID` | high — ids read from their table |
-| `BuyPotion` | a potion id from `PotionConfig.LIST` | high — ids read from their table |
+| Remote | Payload | Fired from |
+| --- | --- | --- |
+| `BuyStair` | `FireServer(<int floor>)` | `Client.StairClient` L157 |
+| `UnlockDoor` | `FireServer(<door id string>)` | `Client.DoorClient` L75 |
+| `BuyTreeNode` | `FireServer(<node id string>)` | `Client.TreeClient` L91 |
+| `MineBlock` | `FireServer(<int>)` | `Client.MineClient` L127 |
+| `Essence` | `FireServer("sync")` | `Client.EssenceClient` L35 |
+
+`BuyUpgrade(<upgrade id>)` and `BuyPotion(<potion id>)` are not spied, but
+`UpgradeConfig.BY_ID` and `PotionConfig.LIST` are keyed by exactly those
+strings, so the payload is taken from the game's own table rather than guessed.
 
 ## What's still a guess
 
-| Remote | What we send | Confidence |
-|---|---|---|
-| `SpinWheel` | no arguments | medium — PrizeWheel costs a flat 100000, wedge is server-side |
-| `Rebirth`, `RedeemCode`, `Totem`, `MineCycle`, `MineReset` | no arguments | medium |
-| `SmelterCollect/Deposit`, `StarforgeDeposit`, `RefractorDeposit` | no arguments | low |
-| `BuyTrail`, `EquipTrail` | no arguments | low |
-| the eight loot systems | no arguments | low |
+| Remote | Confidence | Why |
+| --- | --- | --- |
+| `Rebirth` | medium | no capture; array position is the tier number |
+| `SpinWheel` | medium | costs a flat 100000 gold server-side, so a zero-arg call is likely right |
+| `MineCycle`, `MineReset` | medium | no capture; both are one-shot buttons, not loops |
+| `BuyTrail`, `EquipTrail`, `Totem` | medium | ids read from the config's own tables |
+| `SmelterCollect`, `SmelterDeposit`, `StarforgeDeposit`, `RefractorDeposit` | low | no capture, no argument data |
+| the 8 loot systems | low | no capture, and all eight sit behind doors that cost more than any balance reached so far |
 
-To confirm any of them: open OpenDex's Remote Spy, click the real button once, read the argument
-list, put it in the `fire(...)` call. Each is one line. Where a wrong guess would be actively harmful
-rather than merely rejected, the call is simply not made.
+Every guess is a single `fire(...)` call site and costs one edit to correct.
 
-## Risks
+---
 
-- **Movement mods are probably fine here.** Walk speed, fly, noclip and jump power all appear in
-  the paid hubs for this game, so they aren't hard-blocked. They're off by default anyway — this
-  tab is one toggle away and touches nothing on the server.
-- **Auto-buy sends real remote traffic** on a timer. Keep the delays human. Every loop here
-  jitters its wait rather than firing on a fixed beat.
-- **Owned counts start at zero** each session, so the compounding price of an upgrade restarts low
-  and drifts upward as we buy. Every price is therefore an estimate for one session, never a write.
-- **The game ships an `AdminAction` and `AdminGive` remote.** We map both and never touch them.
-- This place updates often (last patched a day before this was written). The tolerant remote
-  resolution means a rename greys a feature out instead of breaking the script — check the
-  **Recon** tab first when something stops working.
+## Bugs the recon caught
 
-## Testing
+These are listed because each one produced a feature that looked alive and did
+nothing at all.
 
-```sh
-cd nyx-hub/games/tower-incremental
-luau test/core_spec.lua       # 46 assertions
-luau-compile --null main.lua  # syntax
-luau-compile --null core.lua
+**`BuyStair` was fired with no arguments.** The remote takes a floor number.
+
+**`UnlockDoor` was fired with the integers `1,2,3,4,5`.** It takes a door id
+string — the spy caught the real one going out as `"upgradeTree"`.
+
+**`Essence("sync")` was being spammed as an auto-collect.** It is a state
+request. It is now a single button that does what its name says.
+
+**The upgrade catalogue was reading `entry.Id`.** The rows key on lowercase
+`id`, so `catalogue()` was returning **0 of 142 upgrades and 0 of 566 tree
+nodes**. The feature had never loaded anything.
+
+**Upgrade prices were read as a flat number.** Rows are
+`{baseCost, growth, cap}` — the price is `baseCost * growth^owned`, so capped
+upgrades were being re-bought forever at a price that no longer existed.
+
+**Affordability was judged against gold for every upgrade.** Each row declares
+its own currency, so an ember-priced upgrade was being offered against a gold
+balance and would have been rejected on arrival.
+
+**Stair cost was modelled as a flat 1.1 multiplier.** `StairConfig` uses seven
+piecewise growth bands. Floor 720 costs 10.5 trillion where the flat model said
+5.8e30 — twenty orders of magnitude. It now calls the game's own `costOf`.
+
+**Tree nodes have a `requires` chain.** Cheapest-first was offering nodes whose
+parent did not exist yet.
+
+---
+
+## Coverage
+
+46 remotes are declared and resolved tolerantly. **18 are fired.** The rest are
+not oversights:
+
+- **2 are admin-only** (`AdminAction`, `AdminGive`). Firing them is admin abuse
+  and the loudest possible detection signal. Left unwired on purpose.
+- **14 are inbound** — `CodeResult`, `GiftAnswer`, `LeaderboardUpdate`,
+  `PassesOwned`, `IncomeRates`, `ClientInfo`, `RequestRejoin`, `WheelResult` and
+  the six `*_Result` remotes. The server sends these; there is nothing to fire.
+- **`SaveSetting`** is skipped because Obsidian persists its own toggles.
+
+Config modules required: 20. Used: 14.
+
+## Tabs
+
+Farm · Gather · Upgrades · Rebirth · Glyphs · Totems · Trails · Loot · Shop ·
+ESP · Recon · Player · Settings.
+
+Systems that have no remote at all are driven through the game's own config
+functions rather than a remote we would have to invent a payload for:
+
+- **Glyphs** — `GlyphConfig.roll`, the game's own picker, so the odds and the
+  41-set bookkeeping stay correct.
+- **Chopping and crystals** — `WoodConfig.target` / `CrystalConfig.target` hand
+  out the spot to work and `holdSeconds` says how long to hold it.
+- **Mining** — `MineConfig.oreCells` / `remoteBlocksPerOre` / `REMOTE_MOVE_SECONDS`.
+  Falls back to driving the pickaxe handler when no cell list is available,
+  rather than firing a made-up index.
+
+---
+
+## Layout and verification
+
+```
+main.lua        1187 lines   Roblox side
+core.lua         380 lines   pure logic, no Roblox API
+test/core_spec.lua           55 assertions
 ```
 
-`luau-compile` writes bytecode to stdout without `--null`.
+```sh
+cd games/tower-incremental
+luau test/core_spec.lua      # 55 passed
+luau-compile --null main.lua
+luau-analyze main.lua core.lua
+```
+
+`core.lua` holds every decision that can be wrong without throwing — number
+formatting, cost maths, buy ordering, rebirth tier selection, pacing jitter,
+world-target predicates and the full remote path table. It contains no Roblox
+calls, which is the entire reason it can be tested. `main.lua` fetches it at
+runtime and holds everything that needs the live game.
+
+## Known limits
+
+- **Owned counts start at zero each session.** Prices are therefore session
+  estimates; the buy loop will offer a capped upgrade once more at the start of
+  a session before the server rejects it.
+- **The decompiler is unavailable**, so no script in this place has been read
+  line by line. Every id and price comes from a config table read at runtime,
+  which is a stronger source anyway, but it does not describe the logic.
+- **`Rebirth` payload is unverified.** Take one manually in-game with Remote Spy
+  running and it can be confirmed the same way the other five were.

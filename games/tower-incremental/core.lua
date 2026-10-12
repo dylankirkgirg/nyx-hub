@@ -314,4 +314,74 @@ function Core.resolve(root, path)
 	return node
 end
 
+-- ═══════════════════════════════════════════════════════════
+--  shop and rebirth
+-- ═══════════════════════════════════════════════════════════
+
+--- Cheapest row the balance covers, judged per row's own currency.
+---
+--- Used for potions, totems and trails, which are all one flat-price
+--- catalogue where buying the cheapest thing first is right -- unlike
+--- upgrades, where the most expensive affordable buy is the better
+--- rate per click and pickBest handles that instead.
+function Core.pickCheapest(rows, balanceOf)
+	if type(rows) ~= "table" then return nil end
+	if type(balanceOf) ~= "function" then balanceOf = function() return 0 end end
+
+	local best = nil
+	for _, row in ipairs(rows) do
+		if type(row) == "table" then
+			local cost = tonumber(row.cost)
+			-- A row carrying no cost is a shape we do not understand yet,
+			-- not a free purchase. Reading it as 0 would buy it forever.
+			if cost ~= nil and cost == cost and (best == nil or cost < best.cost) then
+				local currency = row.currency or "gold"
+				if (balanceOf(currency) or 0) >= cost then
+					best = { id = row.id, cost = cost, currency = currency, raw = row }
+				end
+			end
+		end
+	end
+	return best
+end
+
+--- The lowest rebirth tier we are actually ready for.
+---
+--- Three gates, all read off the tier's own row: the balance has to cover
+--- its cost in its own currency, we have to have climbed past the floor it
+--- is locked behind, and it must not want more rebirths than we have. Any
+--- one of them unmet means the server rejects it, so the check has to
+--- happen here rather than in the tick.
+---
+--- Returns nil when nothing qualifies, which is the normal state -- most
+--- tiers are out of reach, and firing anyway just spams rejections.
+function Core.nextRebirth(tiers, opts)
+	if type(tiers) ~= "table" then return nil end
+	opts = opts or {}
+
+	local owned = opts.owned or {}
+	local balanceOf = opts.balance or function() return 0 end
+	local floor = tonumber(opts.floor) or math.huge
+	local rebirths = tonumber(opts.rebirths) or 0
+
+	for _, tier in ipairs(tiers) do
+		if type(tier) == "table" then
+			local id = tier.index
+			if not owned[id] then
+				local cost = tonumber(tier.cost)
+				local needRebirths = tonumber(tier.rebirths) or 0
+				local needFloor = tonumber(tier.floor)
+				local reached = needFloor == nil or floor >= needFloor
+
+				if cost ~= nil and reached and needRebirths <= rebirths then
+					if (balanceOf(tier.currency or "gold") or 0) >= cost then
+						return tier
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
 return Core

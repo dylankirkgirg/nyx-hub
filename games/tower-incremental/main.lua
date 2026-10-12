@@ -318,6 +318,10 @@ local T = {
 	ESP      = Window:AddTab({ Name = "ESP",      Icon = "eye" }),
 	Recon    = Window:AddTab({ Name = "Recon",    Icon = "binoculars" }),
 	Player   = Window:AddTab({ Name = "Player",   Icon = "user" }),
+	Rebirth  = Window:AddTab({ Name = "Rebirth",  Icon = "redo" }),
+	Glyphs   = Window:AddTab({ Name = "Glyphs",   Icon = "gem" }),
+	Totems   = Window:AddTab({ Name = "Totems",   Icon = "tower" }),
+	Trails   = Window:AddTab({ Name = "Trails",   Icon = "wind" }),
 	Settings = Window:AddTab({ Name = "Settings", Icon = "settings" }),
 }
 
@@ -442,17 +446,142 @@ end
 
 do
 	local tab = T.Gather
+	local MineCursor = 0
+
+	--- Ask MineConfig where the ore is rather than guessing.
+	---
+	--- It owns the grid layout itself -- which cells hold ore, how many
+	--- remote blocks each ore is worth, how long to wait between moves --
+	--- and it is the same table the game's own mining client reads. Any
+	--- accessor it exposes gets tried; if none of them hand back a
+	--- non-empty list we fall through to the tool handler below instead of
+	--- firing a block index we made up.
+	local function mineCells()
+		local cfg = Config.Mine
+		if type(cfg) ~= "table" then return {} end
+		for _, accessor in ipairs({ "oreCells", "grid", "gridOf", "cells" }) do
+			local fn = cfg[accessor]
+			if type(fn) == "function" then
+				local ok, cells = pcall(fn)
+				if ok and type(cells) == "table" and #cells > 0 then return cells end
+			end
+		end
+		return {}
+	end
+
+	--- Remote cadence, straight off the config. REMOTE_BLOCKS_PER_ORE is 3
+	--- and REMOTE_MOVE_SECONDS is 0.35 on this place; both can move with a
+	--- patch, so neither is written down here.
+	local function minePace()
+		local cfg = Config.Mine
+		local perOre, step = 3, 0.35
+		if type(cfg) == "table" then
+			if type(cfg.remoteBlocksPerOre) == "function" then
+				local ok, v = pcall(cfg.remoteBlocksPerOre)
+				if ok and type(v) == "number" and v > 0 then perOre = v end
+			end
+			if type(cfg.REMOTE_MOVE_SECONDS) == "number" then step = cfg.REMOTE_MOVE_SECONDS end
+		end
+		return perOre, step
+	end
+
+	tab:AddSection({ Name = "Mine" })
 
 	tab:AddToggle({ Name = "Auto Mine", Callback = function(self)
 		onToggle(self, "mine", function() startLoop("mine", function()
+			local cells = mineCells()
+			if #cells > 0 and Remotes.MineBlock then
+				local perOre, step = minePace()
+				MineCursor = MineCursor % #cells + 1
+				local cell = cells[MineCursor]
+				-- cells may be bare indices or small rows describing the cell
+				local index = cell
+				if type(cell) == "table" then
+					index = cell.index or cell.cell or cell.id or cell.position
+				end
+				if index == nil then return false end
+				-- One block per tick; perOre is read above so the pace can be
+				-- reported rather than guessed, but firing three at once
+				-- trips the server's own move check.
+				fire("MineBlock", index)
+				task.wait(step)
+				return true
+			end
 			if not swing("Pickaxe") then return false end
+			pause("collect")
+			return true
+		end) end)
+	end })
+
+	tab:AddButton({ Name = "Reset Mine", Callback = function()
+		if fire("MineReset") then notify("Mine reset sent", 3) else
+			notify("MineReset remote not present", 3)
+		end
+	end })
+
+	-- MineConfig.RUN is 20, so a cycle is one bounded run rather than an
+	-- open-ended dig. Kept as a button because the exact payload is still
+	-- a guess and a wrong guess in a repeating loop is noisier than one
+	-- click.
+	tab:AddButton({ Name = "Cycle Mine", Callback = function()
+		if fire("MineCycle") then notify("Mine cycle sent", 3) else
+			notify("MineCycle remote not present", 3)
+		end
+	end })
+
+	tab:AddSection({ Name = "Harvest" })
+
+	--- Wood and crystals are hold-to-harvest with no remote: WoodConfig and
+	--- CrystalConfig hand out the spot they want worked (`target`) and how
+	--- long the hold lasts (`holdSeconds`). Ask them for both rather than
+	--- reimplementing either.
+	local function harvest(cfg, toolName)
+		if type(cfg) ~= "table" or type(cfg.target) ~= "function" then return false end
+		local ok, spot = pcall(cfg.target)
+		if not ok or spot == nil then return false end
+
+		local part = root()
+		if part and typeof(spot) == "Vector3" then part.CFrame = CFrame.new(spot) end
+
+		local hold = 0.5
+		if type(cfg.holdSeconds) == "function" then
+			local held, v = pcall(cfg.holdSeconds)
+			if held and type(v) == "number" and v > 0 then hold = v end
+		end
+
+		swing(toolName)
+		task.wait(hold)
+		return true
+	end
+
+	tab:AddToggle({ Name = "Auto Chop", Callback = function(self)
+		onToggle(self, "chop", function() startLoop("chop", function()
+			if not harvest(Config.Wood, "Axe") and not swing("Axe") then return false end
 			pause("collect"); return true
 		end) end)
 	end })
 
-	tab:AddToggle({ Name = "Auto Chop", Callback = function(self)
-		onToggle(self, "chop", function() startLoop("chop", function()
-			if not swing("Axe") then return false end
+	tab:AddToggle({ Name = "Auto Crystals", Callback = function(self)
+		onToggle(self, "crystals", function() startLoop("crystals", function()
+			if not harvest(Config.Crystal, "Pickaxe") and not swing("Pickaxe") then return false end
+			pause("collect"); return true
+		end) end)
+	end })
+
+	tab:AddSection({ Name = "Deposit" })
+
+	tab:AddToggle({ Name = "Auto Deposit", Callback = function(self)
+		onToggle(self, "deposit", function() startLoop("deposit", function()
+			fire("SmelterDeposit")
+			fire("StarforgeDeposit")
+			fire("RefractorDeposit")
+			pause("collect"); return true
+		end) end)
+	end })
+
+	tab:AddToggle({ Name = "Auto Smelt", Callback = function(self)
+		onToggle(self, "smelt", function() startLoop("smelt", function()
+			fire("SmelterCollect")
 			pause("collect"); return true
 		end) end)
 	end })
@@ -468,18 +597,7 @@ do
 			:format(Core.format(state.gold), Core.format(state.silver)), 4)
 	end })
 
-	tab:AddLabel("Mining and chopping drive the game's own tool handler, so the payload can't drift.")
-
-	tab:AddToggle({ Name = "Auto Deposit", Callback = function(self)
-		onToggle(self, "deposit", function() startLoop("deposit", function()
-			fire("SmelterDeposit")
-			fire("StarforgeDeposit")
-			fire("RefractorDeposit")
-			pause("collect"); return true
-		end) end)
-	end })
-
-	tab:AddLabel("Mining and chopping drive the game's own tool handler, so the payload can't drift.")
+	tab:AddLabel("Mining, chopping and harvesting all read their grid and hold times from the game's own config.")
 end
 
 -- ═══════════════════════════════════════════════════════════
@@ -535,6 +653,106 @@ do
 		scanPlayerData()
 		notify(("Upgrades %d, tree nodes %d, gold %s")
 			:format(#Upgrades, #TreeNodes, Core.format(state.gold)), 5)
+	end })
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  REBIRTH
+--
+--  RebirthConfig.LIST is the whole ladder. Rows carry their own
+--  currency, cost, floor and rebirth requirement, and the array
+--  position IS the rebirth number -- there is no index field on the
+--  row itself, so it gets stamped on while reading.
+-- ═══════════════════════════════════════════════════════════
+
+local KeepGuard = true
+
+--- Buy every keeper upgrade we can afford.
+---
+--- UpgradeConfig flags these rows `permanent`, and they are what survives a
+--- rebirth. Taking the tier before they are owned throws the whole board
+--- away, so this runs first and the tick waits for it.
+local function buyKeepers()
+	local bought = false
+	for _, entry in ipairs(Upgrades) do
+		local row = entry.raw
+		if row.permanent or row.keeps then
+			local owned = Owned.upgrade[row.id] or 0
+			local cap = tonumber(row.cap) or 1
+			if owned < cap then
+				local cost = Core.upgradePrice(row, owned)
+				local currency = row.currency or "gold"
+				if cost and state.balance(currency) >= cost then
+					if fire("BuyUpgrade", row.id) then
+						Owned.upgrade[row.id] = owned + 1
+						bought = true
+						pause("buy")
+					end
+				end
+			end
+		end
+	end
+	return bought
+end
+
+do
+	local tab = T.Rebirth
+	local Rebirthed = {}
+
+	local function rebirthTiers()
+		local list = Config.Rebirth and Config.Rebirth.LIST
+		if type(list) ~= "table" then return {} end
+		local out = {}
+		for n, row in ipairs(list) do
+			if type(row) == "table" then
+				table.insert(out, {
+					index    = row.index or n,
+					currency = row.currency or "gold",
+					cost     = row.cost,
+					floor    = row.floor,
+					rebirths = row.rebirths,
+					raw      = row,
+				})
+			end
+		end
+		return out
+	end
+
+	tab:AddLabel(#rebirthTiers() > 0
+		and ("Tier ladder: " .. #rebirthTiers() .. " read from RebirthConfig")
+		or "RebirthConfig gave us nothing -- auto-rebirth is off")
+
+	tab:AddToggle({ Name = "Keep Upgrades First", Default = true, Callback = function(self)
+		KeepGuard = self.Value
+	end })
+
+	tab:AddToggle({ Name = "Auto Rebirth", Callback = function(self)
+		onToggle(self, "rebirth", function() startLoop("rebirth", function()
+			scanPlayerData()
+			local tier = Core.nextRebirth(rebirthTiers(), {
+				balance  = function(c) return state.balance(c) end,
+				floor     = state.floor,
+				rebirths = state.rebirths,
+				owned    = Rebirthed,
+			})
+			if tier == nil then
+				pause("rebirth")
+				return true
+			end
+			if KeepGuard and not buyKeepers() then
+				-- Nothing keeper-related is affordable yet, so taking the
+				-- tier now would wipe the board. Wait instead.
+				pause("rebirth")
+				return true
+			end
+			if fire("Rebirth", tier.index) then
+				Rebirthed[tier.index] = true
+				scanPlayerData()
+				notify("Rebirth " .. tostring(tier.index), 3)
+			end
+			pause("rebirth")
+			return true
+		end) end)
 	end })
 end
 
@@ -616,6 +834,143 @@ do
 			notify("Sent — watch chat for the result", 4)
 		end })
 		box:Close()
+	end })
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  GLYPHS
+--
+--  There is no glyph remote among the 31 this place dispatches -- rolling
+--  happens entirely client-side. GlyphConfig.roll is the game's own
+--  picker, so it is called rather than reimplemented: the odds, the
+--  collection cap and the 41-set bookkeeping all stay correct for free.
+-- ═══════════════════════════════════════════════════════════
+
+do
+	local tab = T.Glyphs
+	local GlyphGap = 1
+
+	tab:AddLabel("410 glyphs across 41 sets, 1 gold a roll. Rolling goes through the game's own picker.")
+
+	tab:AddToggle({ Name = "Auto Roll", Callback = function(self)
+		onToggle(self, "glyphs", function() startLoop("glyphs", function()
+			local cfg = Config.Glyph
+			if type(cfg) ~= "table" or type(cfg.roll) ~= "function" then return false end
+			if not pcall(cfg.roll) then return false end
+			task.wait(math.max(0.2, GlyphGap))
+			return true
+		end) end)
+	end })
+
+	tab:AddSlider({ Name = "Roll Interval", Min = 0.2, Max = 5, Default = 1, Increment = 0.1,
+		Callback = function(self) GlyphGap = self.Value end })
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  TOTEMS
+-- ═══════════════════════════════════════════════════════════
+
+do
+	local tab = T.Totems
+
+	--- TotemConfig keys its 13 heads by id in BY_ID/HEADS, and they are a
+	--- dictionary rather than a list -- so it gets walked in sorted cost
+	--- order, because there is no array order to inherit.
+	local function totemRows()
+		local cfg = Config.Totem
+		local heads = type(cfg) == "table" and (cfg.BY_ID or cfg.HEADS) or nil
+		if type(heads) ~= "table" then return {} end
+		local out = {}
+		for id, row in pairs(heads) do
+			if type(row) == "table" then
+				table.insert(out, {
+					id       = row.id or id,
+					name     = row.name or row.id or id,
+					cost     = row.cost,
+					currency = row.currency or "essence",
+					stat     = row.stat,
+				})
+			end
+		end
+		table.sort(out, function(a, b)
+			return (tonumber(a.cost) or math.huge) < (tonumber(b.cost) or math.huge)
+		end)
+		return out
+	end
+
+	local Rows = totemRows()
+	tab:AddLabel(#Rows > 0
+		and (#Rows .. " totems read from TotemConfig")
+		or "TotemConfig did not load -- totems are off")
+
+	tab:AddToggle({ Name = "Auto Buy Totems", Callback = function(self)
+		onToggle(self, "totems", function() startLoop("totems", function()
+			if #Rows == 0 then return false end
+			scanPlayerData()
+			-- Cheapest first: totems are a flat one-off catalogue, so there
+			-- is no rate-per-click argument for buying the dear one.
+			local pick = Core.pickCheapest(Rows, function(c) return state.balance(c) end)
+			if pick and fire("Totem", pick.id) then
+				notify("Bought " .. tostring(pick.name), 3)
+			end
+			pause("buy")
+			return true
+		end) end)
+	end })
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  TRAILS
+-- ═══════════════════════════════════════════════════════════
+
+do
+	local tab = T.Trails
+
+	--- 81 trails in TrailConfig.LIST. Price lives behind costFor rather
+	--- than on the row for some tiers, so both are accepted.
+	local function trailRows()
+		local cfg = Config.Trail
+		local list = type(cfg) == "table" and cfg.LIST or nil
+		if type(list) ~= "table" then return {} end
+		local out = {}
+		for _, row in ipairs(list) do
+			if type(row) == "table" then
+				local id = row.id or row.Id
+				if id then
+					local cost = row.cost
+					if cost == nil and type(cfg.costFor) == "function" then
+						local ok, v = pcall(cfg.costFor, row)
+						if ok then cost = v end
+					end
+					table.insert(out, {
+						id       = id,
+						name     = row.name or id,
+						cost     = cost,
+						currency = row.currency or "gold",
+					})
+				end
+			end
+		end
+		return out
+	end
+
+	local Rows = trailRows()
+	tab:AddLabel(#Rows > 0
+		and (#Rows .. " trails read from TrailConfig")
+		or "TrailConfig did not load -- trails are off")
+
+	tab:AddToggle({ Name = "Auto Buy Trails", Callback = function(self)
+		onToggle(self, "trails", function() startLoop("trails", function()
+			if #Rows == 0 then return false end
+			scanPlayerData()
+			local pick = Core.pickCheapest(Rows, function(c) return state.balance(c) end)
+			if pick and fire("BuyTrail", pick.id) then
+				fire("EquipTrail", pick.id)
+				notify("Bought " .. tostring(pick.name), 3)
+			end
+			pause("buy")
+			return true
+		end) end)
 	end })
 end
 

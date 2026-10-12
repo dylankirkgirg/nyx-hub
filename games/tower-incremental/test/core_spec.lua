@@ -437,6 +437,92 @@ check("a node already owned is never re-offered", function()
 end)
 
 -- ───────────────────────────────────────────────────────────
+print("pickCheapest")
+
+local SHOP_ROWS = {
+	{ id = "gold5x",   cost = 5000,  currency = "gold" },
+	{ id = "gold",     cost = 1000,  currency = "gold" },
+	{ id = "volts2x",  cost = 2000,  currency = "volts" },
+}
+
+check("pickCheapest takes the cheapest thing the balance covers", function()
+	local bal = { gold = 3000, volts = 0 }
+	local of = function(c) return bal[c] or 0 end
+	eq(Core.pickCheapest(SHOP_ROWS, of).id, "gold")
+end)
+
+check("pickCheapest judges each row against its own currency", function()
+	-- rich in volts, broke in gold. A gold-only check would see nothing
+	-- affordable at all and sit idle next to a buy it can actually make.
+	local bal = { gold = 300, volts = 2500 }
+	local of = function(c) return bal[c] or 0 end
+	eq(Core.pickCheapest(SHOP_ROWS, of).id, "volts2x")
+end)
+
+check("pickCheapest returns nil when nothing is affordable", function()
+	eq(Core.pickCheapest(SHOP_ROWS, function() return 0 end), nil)
+end)
+
+check("a row with no cost is not treated as free", function()
+	local rows = { { id = "unknown" }, { id = "paid", cost = 10, currency = "gold" } }
+	eq(Core.pickCheapest(rows, function() return 100 end).id, "paid")
+end)
+
+-- ───────────────────────────────────────────────────────────
+print("nextRebirth")
+
+local REBIRTH_TIERS = {
+	{ index = 1, currency = "gold",    cost = 1e9,   floor = 40 },
+	{ index = 2, currency = "gold",    cost = 9.7e10, floor = 60 },
+	{ index = 9, currency = "essence", cost = 1.2e10, floor = 90 },
+}
+
+check("nextRebirth returns the lowest tier we can afford and reach", function()
+	local bal = { gold = 2e9, essence = 0 }
+	local t = Core.nextRebirth(REBIRTH_TIERS, {
+		balance = function(c) return bal[c] or 0 end, floor = 100, rebirths = 0 })
+	eq(t.index, 1)
+end)
+
+check("nextRebirth skips tiers we are short on gold for", function()
+	-- too broke for either gold tier, but sitting on essence
+	local bal = { gold = 5e8, essence = 1e12 }
+	local t = Core.nextRebirth(REBIRTH_TIERS, {
+		balance = function(c) return bal[c] or 0 end, floor = 100, rebirths = 0 })
+	eq(t.index, 9)
+end)
+
+check("nextRebirth skips tiers above the floor we have climbed to", function()
+	-- rich enough for all three, but not high enough on the tower for any
+	local bal = { gold = 1e12, essence = 1e12 }
+	local t = Core.nextRebirth(REBIRTH_TIERS, {
+		balance = function(c) return bal[c] or 0 end, floor = 30, rebirths = 0 })
+	eq(t, nil)
+end)
+
+check("nextRebirth skips a tier already owned", function()
+	local bal = { gold = 1e12, essence = 0 }
+	local t = Core.nextRebirth(REBIRTH_TIERS, {
+		balance = function(c) return bal[c] or 0 end, floor = 200, rebirths = 0,
+		owned = { [1] = true } })
+	eq(t.index, 2)
+end)
+
+check("nextRebirth honours a tier's rebirth requirement", function()
+	local tiers = {
+		{ index = 1, currency = "gold",    cost = 1e9 },
+		{ index = 9, currency = "essence", cost = 1.2e10, rebirths = 2 },
+	}
+	local bal = { gold = 5e8, essence = 1e12 }
+	local of = function(c) return bal[c] or 0 end
+	-- tier 9 is affordable in essence but wants 2 rebirths: locked at 0,
+	-- open once we have them. tier 1 is owned either way so it can't win.
+	local done = { owned = { [1] = true } }
+	eq(Core.nextRebirth(tiers, { balance = of, floor = 200, rebirths = 0, owned = done.owned }), nil)
+	eq(Core.nextRebirth(tiers, { balance = of, floor = 200, rebirths = 5, owned = done.owned }).index, 9)
+end)
+
+-- ───────────────────────────────────────────────────────────
 print("")
 if failed == 0 then
 	print(string.format("%d passed", passed))
