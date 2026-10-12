@@ -282,8 +282,11 @@ end
 
 local lib = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
 local Library      = loadstring(game:HttpGet(lib .. "Library.lua"))()
-local ThemeManager = loadstring(game:HttpGet(lib .. "addons/ThemeManager.lua"))()
 local SaveManager  = loadstring(game:HttpGet(lib .. "addons/SaveManager.lua"))()
+
+-- No ThemeManager here on purpose. CreateWindow already applies the Scheme
+-- below, and Obsidian exposes no SetTheme method -- calling one would throw
+-- before a single tab got built, which shows up as an empty window.
 
 local NyxTheme = (getgenv and getgenv().Nyx and getgenv().Nyx.theme) or {
 	BackgroundColor = Color3.fromRGB(16, 12, 15),
@@ -306,7 +309,6 @@ local Window = Library:CreateWindow({
 	MobileButtonsSide = "Left",
 })
 
-ThemeManager:SetTheme(NyxTheme)
 SaveManager:SetFolder("Nyx")
 
 local T = {
